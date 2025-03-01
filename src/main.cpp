@@ -1,83 +1,104 @@
 #include <ArduinoBLE.h>
 #include <Arduino_LSM9DS1.h>
 
-// Custom Service UUID (128-bit)
-BLEService imuService("xxx");
+#define LED_PIN D2          // Green LED connected to D2
 
-// Characteristic UUID with increased value size for JSON data
+// BLE Service and Characteristic UUIDs
+BLEService imuService("xxx");
 BLECharacteristic imuDataCharacteristic(
   "xxx",
   BLERead | BLENotify,
-  256  // Characteristic size for JSON payload
+  256
 );
+
+// Timing variables for data transmission
+unsigned long previousCollectMillis = 0;
+unsigned long previousSendMillis = 0;
+const unsigned long sendInterval = 20;    // 50Hz
+const unsigned long collectInterval = 10; // 100Hz
+
+// LED blinking variables for advertising state
+unsigned long previousBlinkMillis = 0;
+const unsigned long blinkInterval = 500; // 500ms blink interval
+bool ledState = LOW;
 
 void setup() {
   Serial.begin(9600);
-  while (!Serial);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW); // Initialize LED off
 
   // Initialize BLE
   if (!BLE.begin()) {
-    Serial.println("Failed to initialize BLE!");
+    Serial.println("BLE initialization failed!");
     while (1);
   }
 
   // Initialize IMU
   if (!IMU.begin()) {
-    Serial.println("Failed to initialize IMU!");
+    Serial.println("IMU initialization failed!");
     while (1);
   }
 
-  // Configure BLE device
+  // Setup BLE service and start advertising
   BLE.setLocalName("GymTrackerBLE");
   BLE.setAdvertisedService(imuService);
   imuService.addCharacteristic(imuDataCharacteristic);
   BLE.addService(imuService);
-
-  // Start advertising
   BLE.advertise();
-  Serial.println("BLE device active, waiting for connections...");
+  Serial.println("BLE active - Waiting for connection...");
 }
 
 void loop() {
-  // Wait for BLE central connection
   BLEDevice central = BLE.central();
-  
+
   if (central) {
     Serial.print("Connected to: ");
     Serial.println(central.address());
+    digitalWrite(LED_PIN, HIGH); // Solid LED when connected
 
-    // While central is connected
     while (central.connected()) {
-      // Initialize sensor values to 0 each iteration
-      float ax = 0, ay = 0, az = 0;
-      float gx = 0, gy = 0, gz = 0;
-      float mx = 0, my = 0, mz = 0;
+      unsigned long currentMillis = millis();
+      static float ax = 0, ay = 0, az = 0;
+      static float gx = 0, gy = 0, gz = 0;
+      static float mx = 0, my = 0, mz = 0;
 
-      // Read available sensor data
-      if (IMU.accelerationAvailable()) {
-        IMU.readAcceleration(ax, ay, az);
-      }
-      if (IMU.gyroscopeAvailable()) {
-        IMU.readGyroscope(gx, gy, gz);
-      }
-      if (IMU.magneticFieldAvailable()) {
-        IMU.readMagneticField(mx, my, mz);
+      // Collect sensor data at 100Hz
+      if (currentMillis - previousCollectMillis >= collectInterval) {
+        previousCollectMillis = currentMillis;
+
+        if (IMU.accelerationAvailable()) IMU.readAcceleration(ax, ay, az);
+        if (IMU.gyroscopeAvailable()) IMU.readGyroscope(gx, gy, gz);
+        if (IMU.magneticFieldAvailable()) IMU.readMagneticField(mx, my, mz);
       }
 
-      // Create JSON-formatted string
-      String jsonPayload = "{";
-      jsonPayload += "\"accelerometer\":[" + String(ax, 2) + "," + String(ay, 2) + "," + String(az, 2) + "],";
-      jsonPayload += "\"gyroscope\":[" + String(gx, 2) + "," + String(gy, 2) + "," + String(gz, 2) + "],";
-      jsonPayload += "\"magnetometer\":[" + String(mx, 2) + "," + String(my, 2) + "," + String(mz, 2) + "]";
-      jsonPayload += "}";
+      // Send data at 50Hz
+      if (currentMillis - previousSendMillis >= sendInterval) {
+        previousSendMillis = currentMillis;
 
-      // Update characteristic value and notify
-      imuDataCharacteristic.writeValue(jsonPayload.c_str());
+        char jsonBuffer[256];
+        snprintf(jsonBuffer, sizeof(jsonBuffer),
+          "{\"accelerometer\":[%.2f,%.2f,%.2f],"
+          "\"gyroscope\":[%.2f,%.2f,%.2f],"
+          "\"magnetometer\":[%.2f,%.2f,%.2f]}",
+          ax, ay, az, gx, gy, gz, mx, my, mz);
 
-      // Short delay to prevent flooding
-      delay(100);
+        Serial.println(jsonBuffer);
+        imuDataCharacteristic.writeValue(jsonBuffer);
+      }
+
+      BLE.poll(); // Maintain BLE connection
     }
 
-    Serial.println("Disconnected from central");
+    // Disconnection cleanup
+    digitalWrite(LED_PIN, LOW);
+    Serial.println("Disconnected");
+  } else {
+    // Blink LED when advertising
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousBlinkMillis >= blinkInterval) {
+      previousBlinkMillis = currentMillis;
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+    }
   }
 }
